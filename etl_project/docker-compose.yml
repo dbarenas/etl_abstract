@@ -1,0 +1,101 @@
+version: '3.8' # Using a more recent version
+
+services:
+  postgres_db: # Renamed from 'db' to be more specific
+    image: postgres:13 # Specify a version for reproducibility
+    container_name: etl_postgres_db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mydb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist PostgreSQL data
+
+  # Airflow services typically require a database initialization step
+  # and then running the webserver and scheduler.
+  # The setup below is a simplified version.
+  # For a production setup, consider the official Airflow Docker image or Helm chart.
+
+  airflow_init: # A one-off service to initialize the Airflow DB
+    build:
+      context: . # Build from the Dockerfile in the current directory (etl_project)
+      dockerfile: Dockerfile
+    container_name: etl_airflow_init
+    entrypoint: /bin/bash
+    command: -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False # Don't load example DAGs
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:password@postgres_db:5432/mydb
+    depends_on:
+      - postgres_db
+    restart: on-failure # In case db is not ready yet
+
+  airflow_webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: etl_airflow_webserver
+    command: airflow webserver -p 8080
+    ports:
+      - "8080:8080" # Expose Airflow web UI
+    volumes:
+      - .:/app # Mount current directory (etl_project) to /app for DAGs and code changes
+      - airflow_logs:/app/airflow_home/logs # Persist logs
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:password@postgres_db:5432/mydb
+      # DAGs folder within the container
+      - AIRFLOW__CORE__DAGS_FOLDER=/app/dags 
+    depends_on:
+      airflow_init: # Ensure DB is initialized
+        condition: service_completed_successfully
+      postgres_db:
+        condition: service_healthy # Or just service_started if healthcheck not configured on postgres
+    restart: always
+
+  airflow_scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: etl_airflow_scheduler
+    command: airflow scheduler
+    volumes:
+      - .:/app
+      - airflow_logs:/app/airflow_home/logs
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://user:password@postgres_db:5432/mydb
+      - AIRFLOW__CORE__DAGS_FOLDER=/app/dags
+    depends_on:
+      airflow_init:
+        condition: service_completed_successfully
+      postgres_db:
+        condition: service_healthy # Or just service_started
+    restart: always
+
+  superset:
+    image: apache/superset:latest # Use a specific version tag in production
+    container_name: etl_superset
+    environment:
+      # Superset specific configurations if needed, e.g., for connecting to Postgres
+      # By default, Superset uses SQLite. Configuration is needed to make it use Postgres
+      # This might involve providing a superset_config.py or environment variables
+      SUPERSET_SECRET_KEY: "your_superset_secret_key" # Change this in production
+    ports:
+      - "8088:8088" # Superset default port
+    depends_on:
+      postgres_db: # Superset can use the same DB or a different one
+        condition: service_healthy # Or just service_started
+    # Volumes for Superset data (e.g., dashboards, charts) can be added here
+    # volumes:
+    #   - superset_data:/app/superset_home 
+
+volumes:
+  postgres_data: # Define the named volume for PostgreSQL
+  airflow_logs:  # Define the named volume for Airflow logs
+  # superset_data: # Define the named volume for Superset data
